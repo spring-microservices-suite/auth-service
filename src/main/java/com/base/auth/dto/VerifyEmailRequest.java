@@ -9,10 +9,8 @@ import lombok.NoArgsConstructor;
 @Data // generates getters, setters, toString, equals, hashCode
 @NoArgsConstructor
 @AllArgsConstructor
-public class LoginRequest {
-    @NotBlank
+public class VerifyEmailRequest {
+    @NotBlank(message = "email is required")
     @Email
-    private String emailId;
-    @NotBlank
-    private String password;
+    private String email;
 }

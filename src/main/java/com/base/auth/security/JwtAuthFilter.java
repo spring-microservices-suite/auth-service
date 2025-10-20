@@ -29,31 +29,30 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         final String authHeader = request.getHeader("Authorization");
 
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-            // No token provided, continue filter chain
             filterChain.doFilter(request, response);
             return;
         }
 
         String jwt = authHeader.substring(7);
-        String emailId;
+        String userId;
 
         try {
-            emailId = jwtService.extractUsername(jwt);
+            userId = jwtService.extractUserId(jwt); // use userId as subject
         } catch (Exception e) {
-            unauthorized(response, "Invalid or malformed JWT");
+            sendUnauthorized(response, "Invalid or malformed JWT");
             return;
         }
 
-        if (emailId != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+        if (userId != null && SecurityContextHolder.getContext().getAuthentication() == null) {
             try {
-                UserDetails userDetails = userDetailsService.loadUserByUsername(emailId);
+                UserDetails userDetails = userDetailsService.loadUserByUsername(userId);
 
                 if (!jwtService.isTokenValid(jwt, userDetails.getUsername())) {
-                    unauthorized(response, "Expired or invalid access token");
+                    sendUnauthorized(response, "Expired or invalid access token");
                     return;
                 }
 
-                // Set authentication in security context
+                // Set authentication in Spring Security context
                 UsernamePasswordAuthenticationToken authToken =
                         new UsernamePasswordAuthenticationToken(
                                 userDetails,
@@ -64,7 +63,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 SecurityContextHolder.getContext().setAuthentication(authToken);
 
             } catch (Exception e) {
-                unauthorized(response, "Unauthorized: " + e.getMessage());
+                sendUnauthorized(response, "Unauthorized");
                 return;
             }
         }
@@ -72,7 +71,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         filterChain.doFilter(request, response);
     }
 
-    private void unauthorized(HttpServletResponse response, String message) throws IOException {
+    private void sendUnauthorized(HttpServletResponse response, String message) throws IOException {
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setContentType("application/json");
         response.getWriter().write("{\"success\":false,\"message\":\"" + message + "\",\"data\":null}");

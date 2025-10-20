@@ -1,18 +1,17 @@
 package com.base.auth.controller;
 
-import com.base.auth.dto.ApiResponse;
-import com.base.auth.dto.LoginRequest;
-import com.base.auth.dto.UserDto;
-import com.base.auth.entity.RefreshToken;
-import com.base.auth.exception.ResourceNotFoundException;
+import com.base.auth.dto.*;
+import com.base.auth.entity.TokenType;
+import com.base.auth.entity.User;
+import com.base.auth.entity.UserToken;
 import com.base.auth.repository.UserRepository;
 import com.base.auth.security.JwtService;
 import com.base.auth.service.UserService;
-import com.base.auth.service.impl.PasswordResetService;
-import com.base.auth.service.impl.RefreshTokenService;
+import com.base.auth.service.UserTokenService;
 import com.base.auth.util.SecurityUtil;
 import jakarta.transaction.Transactional;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -20,8 +19,8 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
-import com.base.auth.dto.AuthResponse;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -30,6 +29,7 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api")
+@Validated
 public class AuthController {
 
     @Autowired
@@ -40,19 +40,12 @@ public class AuthController {
 
     @Autowired
     UserService userService;
-
     @Autowired
-    private AuthenticationManager authenticationManager;
-
-    @Autowired
-    RefreshTokenService refreshTokenService;
-
+    UserTokenService userTokenService;
     @Autowired
     SecurityUtil securityUtil;
-
     @Autowired
-    PasswordResetService resetService;
-
+    private AuthenticationManager authenticationManager;
 
     @PostMapping("/auth/register")
     public ResponseEntity<ApiResponse<UserDto>> createUser(@Valid @RequestBody UserDto userDto) {
@@ -63,8 +56,7 @@ public class AuthController {
     }
 
     @PutMapping("/users/{userId}")
-    public ResponseEntity<ApiResponse<UserDto>> updateUser(@Valid @RequestBody UserDto userDto, @PathVariable String userId) {
-
+    public ResponseEntity<ApiResponse<UserDto>> updateUser(@Valid @RequestBody UserDto userDto, @PathVariable @NotBlank(message = "userId is required") String userId) {
         if (!securityUtil.isSelfOrAdmin(userId)) {
             throw new AccessDeniedException("Unauthorized");
         }
@@ -77,8 +69,7 @@ public class AuthController {
     }
 
     @DeleteMapping("/users/{userId}")
-    public ResponseEntity<ApiResponse<String>> deleteUser(@PathVariable String userId) {
-
+    public ResponseEntity<ApiResponse<String>> deleteUser(@PathVariable @NotBlank(message = "userId is required") String userId) {
         if (!securityUtil.isSelfOrAdmin(userId)) {
             throw new AccessDeniedException("Unauthorized");
         }
@@ -90,9 +81,12 @@ public class AuthController {
     }
 
     @GetMapping("/users/{userId}")
-    public ResponseEntity<ApiResponse<UserDto>> getUser(@PathVariable("userId") String uid) {
+    public ResponseEntity<ApiResponse<UserDto>> getUser(@PathVariable @NotBlank(message = "userId is required") String userId) {
+        if (!securityUtil.isSelfOrAdmin(userId)) {
+            throw new AccessDeniedException("Unauthorized");
+        }
         Map<String, Object> requestMap = new HashMap<>();
-        requestMap.put("userId", uid);
+        requestMap.put("userId", userId);
         return ResponseEntity.ok(ApiResponse.success(this.userService.getUser(requestMap)));
     }
 
@@ -103,15 +97,19 @@ public class AuthController {
     }
 
     @PostMapping("/auth/login")
-    public ResponseEntity<ApiResponse<AuthResponse>> login(@RequestBody LoginRequest req) {
-        authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(req.getEmailId(), req.getPassword())
-        );
+    public ResponseEntity<ApiResponse<AuthResponse>> login(@Valid @RequestBody LoginRequest req) {
         var user = userRepo.findByEmailId(req.getEmailId()).orElseThrow();
-        String accessToken = jwtService.generateAccessToken(user.getEmailId(), user.getRole().name());
+        if (!user.isActive()) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(ApiResponse.error("Please verify Email"));
+        }
+        authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(user.getEmailId(), req.getPassword())
+        );
+        String accessToken = jwtService.generateAccessToken(user.getUserId(), user.getRole().name());
         Instant accessTokenExpiry = jwtService.extractExpiration(accessToken);
 
-        RefreshToken refreshTokenEntity = refreshTokenService.createRefreshToken(user.getUserId());
+        UserToken refreshTokenEntity = userTokenService.createToken(user.getUserId(), TokenType.REFRESH);
 
         AuthResponse tokens = new AuthResponse(accessToken, refreshTokenEntity.getToken(), accessTokenExpiry, refreshTokenEntity.getExpiryDate());
         return ResponseEntity.ok(ApiResponse.success(tokens));
@@ -119,74 +117,40 @@ public class AuthController {
 
     @Transactional
     @PostMapping("/auth/refresh")
-    public ResponseEntity<ApiResponse<AuthResponse>> refresh(@RequestBody Map<String, String> request) {
-        String refreshToken = request.get("refreshToken");
+    public ResponseEntity<ApiResponse<AuthResponse>> refresh(@Valid @RequestBody VerifyTokenRequest request) {
+        String refreshToken = request.getToken();
+        User user = userTokenService.fetchUserFromToken(refreshToken, TokenType.REFRESH);
 
-        if (refreshToken == null || refreshToken.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(ApiResponse.error("Refresh token is required"));
-        }
-
-        // Check DB for refresh token validity
-        RefreshToken tokenEntity = refreshTokenService.findByToken(refreshToken)
-                .orElseThrow(() -> new RuntimeException("Invalid or expired refresh token"));
-
-        if (tokenEntity.isRevoked() || tokenEntity.getExpiryDate().isBefore(Instant.now())) {
-            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                    .body(ApiResponse.error("Invalid, expired, or revoked refresh token"));
-        }
-
-        var user = userRepo.findByUserId(tokenEntity.getUserId())
-                .orElseThrow(() -> new ResourceNotFoundException("User", "UserId", tokenEntity.getUserId()));
-
-        // Generate new access token
-        String newAccessToken = jwtService.generateAccessToken(user.getEmailId(), user.getRole().name());
+        String newAccessToken = jwtService.generateAccessToken(user.getUserId(), user.getRole().name());
         Instant accessTokenExpiry = jwtService.extractExpiration(newAccessToken);
-        refreshTokenService.revokeToken(refreshToken);
-        RefreshToken newRefressToken = refreshTokenService.createRefreshToken(user.getUserId());
-        AuthResponse tokens = new AuthResponse(newAccessToken, newRefressToken.getToken(), accessTokenExpiry, newRefressToken.getExpiryDate());
+
+        UserToken newRefreshToken = userTokenService.createToken(user.getUserId(), TokenType.REFRESH);
+        AuthResponse tokens = new AuthResponse(newAccessToken, newRefreshToken.getToken(), accessTokenExpiry, newRefreshToken.getExpiryDate());
+
         return ResponseEntity.ok(ApiResponse.success(tokens));
     }
 
     @PostMapping("/users/logout")
-    public ResponseEntity<ApiResponse<String>> logout(@RequestBody Map<String, String> request) {
-        String refreshToken = request.get("refreshToken");
-
-        if (refreshToken == null || refreshToken.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(ApiResponse.error("Refresh token is required"));
-        }
-
-        boolean revoked = refreshTokenService.revokeToken(refreshToken);
-
-        if (!revoked) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(ApiResponse.error("Invalid or already revoked refresh token"));
-        }
-
+    public ResponseEntity<ApiResponse<String>> logout(@Valid @RequestBody VerifyTokenRequest request) {
+        String refreshToken = request.getToken();
+        UserToken userToken = userTokenService.validateAndRevokeToken(refreshToken, TokenType.REFRESH);
         return ResponseEntity.ok(ApiResponse.success("Logged out successfully"));
     }
 
     @PostMapping("/users/all/logout")
-    public ResponseEntity<ApiResponse<String>> logoutFromAll(@RequestBody Map<String, String> request) {
-        String userId = request.get("userId");
-
+    public ResponseEntity<ApiResponse<String>> logoutFromAll(@Valid @RequestBody LogOutAllRequest request) {
+        String userId = request.getUserId();
         if (!securityUtil.isSelfOrAdmin(userId)) {
             throw new AccessDeniedException("Unauthorized");
         }
-
-        if (userId == null || userId.isEmpty()) {
-            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
-                    .body(ApiResponse.error("userId is required"));
-        }
-        refreshTokenService.deleteAllToken(userId);
+        userTokenService.deleteAllToken(userId, TokenType.REFRESH);
         return ResponseEntity.ok(ApiResponse.success("Logged out successfully from all sessions"));
     }
 
     @PostMapping("/auth/forgot-password")
-    public ResponseEntity<ApiResponse<String>> forgotPassword(@RequestBody Map<String, String> req) {
-        String emailId = req.get("emailId");
-        resetService.createResetToken(emailId);
+    public ResponseEntity<ApiResponse<String>> forgotPassword(@Valid @RequestBody VerifyEmailRequest req) {
+        String emailId = req.getEmail();
+        userTokenService.createToken(emailId, TokenType.PASSWORD_RESET);
         return ResponseEntity.ok(ApiResponse.success(
                 "If the emailId exists, a reset link has been generated (check backend logs)."
         ));
@@ -194,11 +158,28 @@ public class AuthController {
 
     // Reset password
     @PostMapping("/auth/reset-password")
-    public ResponseEntity<ApiResponse<String>> resetPassword(@RequestBody Map<String, String> req) {
-        String token = req.get("token");
-        String newPassword = req.get("newPassword");
-        resetService.resetPassword(token, newPassword);
+    public ResponseEntity<ApiResponse<String>> resetPassword(@Valid @RequestBody ResetPassRequest req) {
+        String token = req.getToken();
+        String newPassword = req.getNewPassword();
+        userTokenService.resetPassword(token, newPassword, TokenType.PASSWORD_RESET);
         return ResponseEntity.ok(ApiResponse.success("Password reset successfully"));
+    }
+
+    @PostMapping("/auth/send-verification-email")
+    public ResponseEntity<ApiResponse<String>> sendVerificationEmail(@Valid @RequestBody VerifyEmailRequest req) {
+        String emailId = req.getEmail();
+        userTokenService.createToken(emailId, TokenType.EMAIL_VERIFICATION);
+        return ResponseEntity.ok(ApiResponse.success(
+                "If the emailId exists, a verification link has been generated (check backend logs)."
+        ));
+    }
+
+    // Verify email
+    @PostMapping("/auth/verify-email")
+    public ResponseEntity<ApiResponse<String>> verifyEmail(@Valid @RequestBody VerifyTokenRequest req) {
+        String token = req.getToken();
+        userTokenService.verifyEmail(token, TokenType.EMAIL_VERIFICATION);
+        return ResponseEntity.ok(ApiResponse.success("Email verified successfully"));
     }
 
 }

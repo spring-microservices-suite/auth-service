@@ -3,12 +3,12 @@ package com.base.auth.service.impl;
 import com.base.auth.dto.UserDto;
 import com.base.auth.entity.User;
 import com.base.auth.exception.ResourceNotFoundException;
+import com.base.auth.exception.ResourceNotUniqueException;
 import com.base.auth.repository.UserRepository;
 import com.base.auth.service.UserService;
 import org.modelmapper.ModelMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import com.base.auth.exception.ResourceNotUniqueException;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -19,11 +19,10 @@ import java.util.stream.Collectors;
 @Service
 public class UserServiceImpl implements UserService {
 
-    @Autowired
-    UserRepository userRepo;
-
     private final ModelMapper modelMapper;
     private final PasswordEncoder passwordEncoder;
+    @Autowired
+    UserRepository userRepo;
 
     public UserServiceImpl(ModelMapper modelMapper, PasswordEncoder passwordEncoder) {
         this.modelMapper = modelMapper;
